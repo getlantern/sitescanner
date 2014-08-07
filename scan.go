@@ -1,43 +1,36 @@
+// This is a scanner that attempts to use host spoofing through CloudFlare to hit 
+// our geo-ip server. Any sites that work to do so have working CloudFlare tunneling.
 package main
 
 import (
 	"bufio"
-	//"crypto/tls"
+	"crypto/sha1"
+	"errors"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
 	"os"
-	"regexp"
 	"sync"
+	"time"
 
 	"github.com/getlantern/tls"
 )
+
+var cloudflare = make([]string, 5)
 
 type sitebody struct {
 	domain string
 	page   []byte
 }
 
-func whois(site string, c chan sitebody, wg sync.WaitGroup) {
-	whois := "http://www.port43whois.com/index.php?query=" + site
-	fmt.Println(whois)
-	resp, err := http.Get(whois)
-
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
-
-	sb := sitebody{domain: site, page: body}
-	c <- sb
-	wg.Done()
+func noRedirect(req *http.Request, via []*http.Request) error {
+	return errors.New("Don't redirect!")
 }
 
-func testsite(site string) {
+func testsite(site string, wg *sync.WaitGroup) {
+
 	client := &http.Client{
 		Transport: &http.Transport{
 			Dial: func(network, addr string) (conn net.Conn, err error) {
@@ -46,60 +39,80 @@ func testsite(site string) {
 				})
 			},
 		},
+		CheckRedirect: noRedirect,
 	}
 
 	req, _ := http.NewRequest("GET", "http://geo.getiantem.org/lookup", nil)
 	resp, err := client.Do(req)
-	log.Println("Made request")
 	if err != nil {
-		log.Fatalf("Unable to do GET: %s", err)
+	} else {
+		body, err := ioutil.ReadAll(resp.Body)
+		defer resp.Body.Close()
+		if err != nil {
+			//log.Println(err)
+		} else {
+			h := sha1.New()
+			h.Write(body)
+			bs := h.Sum(nil)
+
+			sha := fmt.Sprintf("%x", bs)
+			if sha == "f38a3c79bb1aee035200ef0c759b4f961406c1fc" {
+				log.Println("MATCH FOR: " + site)
+				cloudflare = append(cloudflare, site)
+			}
+		}
+
 	}
-	defer resp.Body.Close()
-	io.Copy(os.Stdout, resp.Body)
+	wg.Done()
+}
+
+func processbatch(batch []string) {
+	var wg sync.WaitGroup
+	for i := 0; i < len(batch); i++ {
+		var site = batch[i]
+		wg.Add(1)
+		go testsite(site, &wg)
+	}
+
+	wg.Wait()
 }
 
 func main() {
 
+	start := time.Now()
 	file, err := os.Open("sites.txt")
 	if err != nil {
 		panic(err)
 	}
 
-	var wg sync.WaitGroup
-	c := make(chan sitebody)
 	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		site := scanner.Text()
-		fmt.Println(site) // Println will add back the final '\n'
+	var sitesPerBatch = 100
+	var batches [5][100]string
 
-		wg.Add(1)
-		go whois(site, c, wg)
+	var batchindex = 0
+	var index = 0
+	for scanner.Scan() {
+		if index%sitesPerBatch == 0 {
+			batchindex++
+			index = 0
+		}
+
+		site := scanner.Text
+		batches[batchindex-1][index] = site
+		index++=
 	}
+
 	if err := scanner.Err(); err != nil {
 		fmt.Fprintln(os.Stderr, "reading file input: ", err)
 	}
-	go func() {
-		wg.Wait()
-		close(c)
-	}()
 
-	for sb := range c {
-		fmt.Println()
-		fmt.Println()
-		fmt.Println()
-		//fmt.Printf("%s", body)
-		fmt.Println()
-		fmt.Println()
-		fmt.Println()
-
-		re := regexp.MustCompile("(?i)cloudflare")
-		cf := re.Match(sb.page)
-		fmt.Printf("%q\n", cf)
-
-		if cf {
-			fmt.Printf("Found CloudFlare\n")
-			testsite(sb.domain)
-		}
+	for i := 0; i < len(batches); i++ {
+		fmt.Println("Processing batch %s", i)
+		processbatch(batches[i][:])
+		fmt.Println("cur sites:", cloudflare)
 	}
+
+	fmt.Println("FINAL SITES:", cloudflare)
+	fmt.Printf("Scan took %.2fs\n", time.Since(start).Seconds())
 
 }
