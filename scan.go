@@ -35,7 +35,7 @@ func testsite(site string, wg *sync.WaitGroup, sha1tolookfor string) (string, er
 		Transport: &http.Transport{
 			Dial: func(network, addr string) (conn net.Conn, err error) {
 				return tls.Dial("tcp", site+":443", &tls.Config{
-					SuppressServerNameInClientHandshake: true,
+					InsecureSkipVerify: true,
 				})
 			},
 		},
@@ -88,7 +88,7 @@ func processbatch(batch []string, sha1tolookfor string) {
 func main() {
 
 	start := time.Now()
-	file, err := os.Open("chinese-sites.txt")
+	file, err := os.Open("sites.txt")
 	if err != nil {
 		panic(err)
 	}
