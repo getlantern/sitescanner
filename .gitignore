@@ -25,3 +25,6 @@ _testmain.go
 # vim swap files
 *.swp
 *.swo
+
+# executable
+sitescanner

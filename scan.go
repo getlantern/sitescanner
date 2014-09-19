@@ -1,10 +1,11 @@
-// This is a scanner that attempts to use host spoofing through CloudFlare to hit
+// This is a scanner that attempts to use domain fronting through CloudFlare to hit
 // our geo-ip server. Any sites that work to do so have working CloudFlare tunneling.
 package main
 
 import (
 	"bufio"
 	"crypto/sha1"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -15,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/getlantern/tls"
+	"gopkg.in/getlantern/tlsdialer.v1"
 )
 
 var cloudflare = make([]string, 5)
@@ -34,9 +35,12 @@ func testsite(site string, wg *sync.WaitGroup, sha1tolookfor string) (string, er
 	client := &http.Client{
 		Transport: &http.Transport{
 			Dial: func(network, addr string) (conn net.Conn, err error) {
-				return tls.Dial("tcp", site+":443", &tls.Config{
-					InsecureSkipVerify: true,
-				})
+				return tlsdialer.Dial(
+					"tcp",
+					site+":443",
+					false,
+					&tls.Config{InsecureSkipVerify: true},
+				)
 			},
 		},
 		CheckRedirect: noRedirect,
