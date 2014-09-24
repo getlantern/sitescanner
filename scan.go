@@ -19,7 +19,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"regexp"
 	"runtime"
 	"sync"
 	"time"
@@ -27,19 +26,23 @@ import (
 	"gopkg.in/getlantern/tlsdialer.v1"
 )
 
-const workers = 10
-
-var titleRe *regexp.Regexp = regexp.MustCompile("<title>(.*)</title>")
+var workers = runtime.NumCPU()
 
 type Pairing struct {
+	// The domain we're trying to reach.
 	Target string
-	Front string
+	// The path that we're requesting in the target domain.  This will be ""
+	// unless a request to the naked domain would redirect.
+	Path string
+	// Hash of the body obtained in response to a request for Url.
 	Hash string
+	// The domain we're trying to domain front through.
+	Front string
 }
 
 func main() {
+	runtime.GOMAXPROCS(runtime.NumCPU())
 	start := time.Now()
-	runtime.GOMAXPROCS(8)
 	main_()
 	fmt.Println("**************** COMPLETE ******************")
 	fmt.Printf("Scan took %.2fs\n", time.Since(start).Seconds())
@@ -55,7 +58,6 @@ func main_() {
 	// Size of work queue is O(n^2) on the size of the input lists, so we
 	// generate it lazily.
 	go feedTasks(tasksChan)
-
 
 	workersWg.Add(workers)
 	for i := 0; i < workers; i++ {
@@ -78,13 +80,13 @@ func main_() {
 		close(resultsChan)
 	}()
 
-	for result := range(resultsChan) {
+	for result := range resultsChan {
 		fmt.Printf("Can reach %v through %v\n", result.Target, result.Front)
 	}
 }
 
 func work(tasksChan <-chan Pairing, resultsChan chan<- Pairing, workersWg *sync.WaitGroup) {
-	for task := range(tasksChan) {
+	for task := range tasksChan {
 		if canProxy(task) {
 			resultsChan <- task
 		}
@@ -100,7 +102,7 @@ func canProxy(p Pairing) bool {
 			Dial: func(network, addr string) (conn net.Conn, err error) {
 				return tlsdialer.Dial(
 					"tcp",
-					p.Target + ":443",
+					p.Target+":443",
 					// We can't use a domain front that requires a properly
 					// populated SNI, so let's make those fail.
 					false,
@@ -110,7 +112,7 @@ func canProxy(p Pairing) bool {
 		},
 		CheckRedirect: noRedirect,
 	}
-	req, err := http.NewRequest("GET", "http://" + p.Front, nil)
+	req, err := http.NewRequest("GET", "http://"+p.Front+p.Path, nil)
 	if err != nil {
 		logErr("building GET request", err)
 		return false
@@ -142,25 +144,74 @@ func feedTasks(taskChan chan<- Pairing) {
 	if err != nil {
 		panic(err)
 	}
-	for _, target := range(targets) {
+	for _, target := range targets {
 		logDebug("Trying", target)
-		resp, err := http.Get("https://" + target)
+		path, hash, err := fetchTarget(target)
 		if err != nil {
-			logErr("can't reach " + target + " *without* a proxy", err)
+			logErr("can't reach "+target+" *without* a proxy", err)
 			continue
 		}
-		hash, err := bodyHash(resp)
-		if err != nil {
-			logErr("can't hash " + target + "'s response *without* a proxy", err)
-			continue
-		}
-		for _, front := range(fronts) {
+		for _, front := range fronts {
 			logDebug("Enqueuing pairing:", front, target)
-			taskChan <- Pairing{Target: target, Front: front, Hash: hash}
+			taskChan <- Pairing{Target: target, Path: path, Hash: hash, Front: front}
 		}
 	}
 	logDebug("Enqueued all input")
 	close(taskChan)
+}
+
+// fetchTarget makes a request for the given target *without* domain fronting,
+// returning a path that will hopefully not redirect, and the hash of the
+// response body.
+func fetchTarget(target string) (path string, hash string, err error) {
+	client := &http.Client{
+		Transport: &http.Transport{
+			Dial: func(network, addr string) (conn net.Conn, err error) {
+				return tlsdialer.Dial(
+					"tcp",
+					target+":443",
+					// We're doing, not front candidates, here, so no need to
+					// filter out those that will require a properly populated
+					// SNI.
+					true,
+					&tls.Config{InsecureSkipVerify: true},
+				)
+			},
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			path = via[len(via)-1].URL.Path
+			logDebug("(re)setting path to", path)
+			return nil
+		},
+	}
+	req, err := http.NewRequest("GET", "http://"+target, nil)
+	if err != nil {
+		logErr("building GET request", err)
+		return "", "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		logErr("performing GET request", err)
+		return "", "", err
+	}
+	hash, err = bodyHash(resp)
+	if err != nil {
+		logErr("getting body hash", err)
+		return "", "", err
+	}
+	return
+}
+
+func bodyHash(resp *http.Response) (string, error) {
+	body, err := ioutil.ReadAll(resp.Body)
+	defer resp.Body.Close()
+	if err != nil {
+		return "", err
+	}
+	h := sha1.New()
+	h.Write(body)
+	bs := h.Sum(nil)
+	return fmt.Sprintf("%x", bs), nil
 }
 
 func readLines(filename string) ([]string, error) {
@@ -177,7 +228,7 @@ func readLines(filename string) ([]string, error) {
 }
 
 func noRedirect(req *http.Request, via []*http.Request) error {
-	return errors.New("Don't redirect!")
+	return errors.New("Don't redirect!: " + via[len(via)-1].URL.String())
 }
 
 func logErr(msg string, err error) {
@@ -187,17 +238,5 @@ func logErr(msg string, err error) {
 }
 
 func logDebug(vs ...interface{}) {
-	//log.Println(vs...)
-}
-
-func bodyHash(resp *http.Response) (string, error) {
-	body, err := ioutil.ReadAll(resp.Body)
-	defer resp.Body.Close()
-	if err != nil {
-		return "", err
-	}
-	h := sha1.New()
-	h.Write(body)
-	bs := h.Sum(nil)
-	return fmt.Sprintf("%x", bs), nil
+	log.Println(vs...)
 }
