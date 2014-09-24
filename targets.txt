@@ -1,0 +1,5 @@
+news.ycombinator.com
+www.reddit.com
+google.com
+facebook.com
+twitter.com
