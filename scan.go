@@ -131,8 +131,6 @@ func proxiedResponseFeatures(p Pairing) (ResponseFeatures, error) {
 					p.Target+":443",
 					// We can't use a domain front that requires a properly
 					// populated SNI, so let's make those fail.
-					// These should have been filtered out already, but let's
-					// check anyway for robustness to change.
 					false,
 					&tls.Config{InsecureSkipVerify: true},
 				)
