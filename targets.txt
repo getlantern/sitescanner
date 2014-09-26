@@ -1,2 +1,4 @@
 news.ycombinator.com
 reddit.com
+google.com
+facebook.com

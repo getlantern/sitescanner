@@ -4,10 +4,6 @@
 //        fronting through the front candidate.  Log successfully proxied pairs
 //        to stdout.  Log detected errors to stderr.
 
-// XXX: in addition to checking the hash of the response <body>, check the hash
-// of the response <head>, and whether we get a 200-OK response at all.  Use
-// these for more nuanced reports.
-
 // XXX: record where we left off, to enable resuming an interrupted scan.
 
 package main
@@ -18,7 +14,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -34,26 +30,47 @@ import (
 
 var workers = runtime.NumCPU()
 
-//XXX: use this instead of, or in addition to, the hash.
 var headRe *regexp.Regexp = regexp.MustCompile("<head>(.*)</head>")
+
+const reportFmt = "%-24s %-24s %-10s %-10s\n"
+
+// ResponseFeatures contains the characteristics we'll use when comparing
+// direct vs domain fronted Responses, to estimate the likelihood that we are
+// successfully fronting to a target.
+//
+// We are also checking whether we get a 200 OK response from the site at all,
+// but we don't include this in ResponseFeatures becouse we will not even try
+// domain fronting to sites for which we don't get 200 OK in a direct request,
+// and we are not reporting sites for which we don't get a 200 OK through
+// domain fronting.
+type ResponseFeatures struct {
+	// Hash of the body's <head> element, or "" if the body has none
+	HeadHash string
+	// Hash of the whole body, or "" if the body is the empty string
+	BodyHash string
+}
 
 type Pairing struct {
 	// The domain we're trying to reach.
 	Target string
 	// A URL where we can hopefully reach Target without redirects.
 	TargetURL url.URL
-	// Hash of the body obtained in response to a GET request for
-	// TargetURL.
-	Hash string
 	// The domain we're trying to domain front through.
 	Front string
 	// A URL where we can hopefully reach Front without redirects.
 	FrontURL url.URL
+
+	Features ResponseFeatures
 }
+
 
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	start := time.Now()
+	fmt.Println()
+	fmt.Printf(reportFmt, "TARGET", "FRONT", "BODIES", "HEADS")
+	fmt.Printf(reportFmt, "======", "=====", "======", "=====")
+	fmt.Println()
 	main_()
 	fmt.Println("**************** COMPLETE ******************")
 	fmt.Printf("Scan took %.2fs\n", time.Since(start).Seconds())
@@ -87,15 +104,24 @@ func main_() {
 
 func work(tasksChan <-chan Pairing, workersWg *sync.WaitGroup) {
 	for task := range tasksChan {
-		if canProxy(task) {
-			fmt.Printf("We can reach %v through %v\n", task.Target, task.Front)
+		features, err := proxiedResponseFeatures(task)
+		if err != nil {
+			logDebug("proxiedResponseFeatures error:", err)
+			continue
 		}
+		fmt.Printf(
+			reportFmt,
+			task.Target,
+			task.Front,
+			matchReport(task.Features.BodyHash, features.BodyHash),
+			matchReport(task.Features.HeadHash, features.HeadHash),
+		)
 	}
 	logDebug("One worker done")
 	workersWg.Done()
 }
 
-func canProxy(p Pairing) bool {
+func proxiedResponseFeatures(p Pairing) (ResponseFeatures, error) {
 	logDebug("canProxy", p)
 	client := &http.Client{
 		Transport: &http.Transport{
@@ -120,20 +146,14 @@ func canProxy(p Pairing) bool {
 	req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {
 		logErr("building GET request", err)
-		return false
+		return ResponseFeatures{}, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
 		logErr("performing GET request", err)
-		return false
+		return ResponseFeatures{}, err
 	}
-	hash, err := bodyHash(resp)
-	if err != nil {
-		logErr("getting body hash", err)
-		return false
-	}
-	logDebug("For pairing", p, hash == p.Hash)
-	return hash == p.Hash
+	return responseFeatures(resp)
 }
 
 // feedTasks reads input files, enqueues testing tasks in taskChan, and closes
@@ -156,49 +176,56 @@ func feedTasks(taskChan chan<- Pairing) {
 	// No-redirect URLs
 	nru := make(map[string]url.URL)
 
-	// No-redirect hashes
-	nrh := make(map[string]string)
+	// No-redirect response features
+	nrf := make(map[string]ResponseFeatures)
 
-	urlAndHash := func(domain string) (u url.URL, hash string) {
+	nilURL := url.URL{}
+	nilRF := ResponseFeatures{}
+
+	// URLnRF just provides caching and some logging on top of followRedirects.
+	URLnRF := func(domain string) (url.URL, ResponseFeatures) {
 		if _, ok := badDomains[domain]; ok {
-			return url.URL{}, ""
+			logDebug("Known bad domain", domain)
+			return nilURL, nilRF
 		}
 		u, ok := nru[domain]
 		if ok {
-			hash = nrh[domain]
+			logDebug("Cached domain", domain, u.String())
+			return u, nrf[domain]
 		} else {
-			u, hash, err := followRedirects(domain)
+			u, rf, err := followRedirects(domain)
 			if err != nil {
 				logErr("can't reach "+domain+" *without* a proxy", err)
 				badDomains[domain] = true
-				return url.URL{}, ""
+				return nilURL, nilRF
 			} else {
+				logDebug("Got new url", u.String(), "fetures", rf)
 				nru[domain] = u
-				nrh[domain] = hash
+				nrf[domain] = rf
+				return u, rf
 			}
 		}
-		return
 	}
 
-	nilURL := url.URL{}
 	for _, target := range targets {
 		logDebug("Trying", target)
-		targetURL, hash := urlAndHash(target)
+		targetURL, features := URLnRF(target)
 		if targetURL == nilURL {
+			logDebug("Got null URL for", target)
 			continue
 		}
 		for _, front := range fronts {
 			logDebug("Enqueuing pairing:", front, target)
-			frontURL, _ := urlAndHash(target)
+			frontURL, _ := URLnRF(front)
 			if frontURL == nilURL {
 				continue
 			}
 			taskChan <- Pairing{
 				Target:    target,
 				TargetURL: targetURL,
-				Hash:      hash,
 				Front:     front,
 				FrontURL:  frontURL,
+				Features: features,
 			}
 		}
 	}
@@ -207,12 +234,15 @@ func feedTasks(taskChan chan<- Pairing) {
 }
 
 // followRedirects makes a request for the given domain without domain fronting,
-// returning an URL that will hopefully not redirect, and the hash
-// of the response body.
-func followRedirects(domain string) (u url.URL, hash string, err error) {
+// returning a URL that will hopefully not redirect, and the relevant features
+// of the response.
+func followRedirects(domain string) (u url.URL, rf ResponseFeatures, err error) {
+	// use http scheme to avoid getting double-TLSed
+	u = url.URL{Scheme: "http", Host: domain}
 	client := &http.Client{
 		Transport: &http.Transport{
 			Dial: func(network, addr string) (conn net.Conn, err error) {
+				logDebug("** trying to get", addr)
 				return tlsdialer.Dial(
 					"tcp",
 					domain+":443",
@@ -224,38 +254,73 @@ func followRedirects(domain string) (u url.URL, hash string, err error) {
 			},
 		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// use http scheme to avoid getting double-TLSed
+			req.URL.Scheme = "http"
 			u = *req.URL
 			logDebug("(re)setting URL to", u.String())
 			return nil
 		},
 	}
-	req, err := http.NewRequest("GET", "https://"+domain, nil)
+	// use http scheme to avoid getting double-TLSed
+	req, err := http.NewRequest("GET", "http://"+domain, nil)
 	if err != nil {
 		logErr("building GET request", err)
-		return url.URL{}, "", err
+		return url.URL{}, rf, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
 		logErr("performing GET request", err)
-		return url.URL{}, "", err
+		return url.URL{}, rf, err
 	}
-	hash, err = bodyHash(resp)
+	if resp.StatusCode != 200 {
+		return url.URL{}, rf, errors.New("Non-200 response:" + resp.Status)
+	}
+	rf, err = responseFeatures(resp)
 	if err != nil {
-		logErr("getting body hash", err)
-		return url.URL{}, "", err
+		logErr("getting response features", err)
+		return url.URL{}, rf, err
 	}
 	return
 }
 
-func bodyHash(resp *http.Response) (string, error) {
-	h := sha1.New()
-	_, err := io.Copy(h, resp.Body)
+func responseFeatures(resp *http.Response) (ret ResponseFeatures, err error) {
+	body, err := ioutil.ReadAll(resp.Body)
 	defer resp.Body.Close()
 	if err != nil {
-		return "", err
+		return ret, err
 	}
+	if body == nil {
+		ret.BodyHash = ""
+		ret.HeadHash = ""
+		return ret, nil
+	}
+	ret.BodyHash = hash(body)
+	headMatches := headRe.FindSubmatch(body)
+	if headMatches == nil {
+		ret.HeadHash = ""
+	} else {
+		ret.HeadHash = hash(headMatches[1])
+	}
+	return
+}
+
+func hash(s []byte) string {
+	h := sha1.New()
+	h.Write(s)
 	bs := h.Sum(nil)
-	return fmt.Sprintf("%x", bs), nil
+	return fmt.Sprintf("%x", bs)
+}
+
+func matchReport(expected, actual string) string {
+	if actual == expected {
+		if actual == "" {
+			return "both empty"
+		} else {
+			return "match"
+		}
+	} else {
+		return "differ"
+	}
 }
 
 func readLines(filename string) ([]string, error) {
@@ -284,5 +349,5 @@ func logErr(msg string, err error) {
 // Poor man's debug level switch.  Comment out the body to suppress noise.
 // XXX: learn about the idiomatic way to do this in Go
 func logDebug(vs ...interface{}) {
-	log.Println(vs...)
+	//log.Println(vs...)
 }
