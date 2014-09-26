@@ -30,7 +30,7 @@ import (
 
 var workers = runtime.NumCPU()
 
-var headRe *regexp.Regexp = regexp.MustCompile("<head>(.*)</head>")
+var headRe *regexp.Regexp = regexp.MustCompile("(?s)<head>(.*)</head>")
 
 const reportFmt = "%-24s %-24s %-10s %-10s\n"
 
