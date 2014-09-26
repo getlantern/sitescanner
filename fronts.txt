@@ -1,4 +1,4 @@
 reddit.com
 news.ycombinator.com
 cloudflare.com
-fastly.com
+cdnjs.com

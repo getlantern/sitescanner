@@ -4,6 +4,10 @@
 //        fronting through the front candidate.  Log successfully proxied pairs
 //        to stdout.  Log detected errors to stderr.
 
+// XXX: in addition to checking the hash of the response <body>, check the hash
+// of the response <head>, and whether we get a 200-OK response at all.  Use
+// these for more nuanced reports.
+
 // XXX: record where we left off, to enable resuming an interrupted scan.
 
 package main
@@ -14,11 +18,13 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"regexp"
 	"runtime"
 	"sync"
 	"time"
@@ -28,16 +34,21 @@ import (
 
 var workers = runtime.NumCPU()
 
+//XXX: use this instead of, or in addition to, the hash.
+var headRe *regexp.Regexp = regexp.MustCompile("<head>(.*)</head>")
+
 type Pairing struct {
 	// The domain we're trying to reach.
 	Target string
-	// The path that we're requesting in the target domain.  This will be ""
-	// unless a request to the naked domain would redirect.
-	Path string
-	// Hash of the body obtained in response to a request for Url.
+	// A URL where we can hopefully reach Target without redirects.
+	TargetURL url.URL
+	// Hash of the body obtained in response to a GET request for
+	// TargetURL.
 	Hash string
 	// The domain we're trying to domain front through.
 	Front string
+	// A URL where we can hopefully reach Front without redirects.
+	FrontURL url.URL
 }
 
 func main() {
@@ -51,7 +62,6 @@ func main() {
 func main_() {
 
 	tasksChan := make(chan Pairing, workers)
-	resultsChan := make(chan Pairing, workers)
 
 	workersWg := sync.WaitGroup{}
 
@@ -61,7 +71,7 @@ func main_() {
 
 	workersWg.Add(workers)
 	for i := 0; i < workers; i++ {
-		go work(tasksChan, resultsChan, &workersWg)
+		go work(tasksChan, &workersWg)
 	}
 
 	// Task completion handling:
@@ -70,25 +80,15 @@ func main_() {
 	// input.  Each worker reports workersWg.Done() when it learns that
 	// tasksChan is closed.  By that time, the worker has sent all its results
 	// to the resultsChan.  Therefore, by the time workersWg.Wait() returns,
-	// all `Pairing`s have been checked and all the successful ones are in
-	// resultsChan.  Thus, the main goroutine will get all these before it's
-	// notified that resultsChan has been closed.
-
-	go func() {
-		workersWg.Wait()
-		logDebug("All workers done.")
-		close(resultsChan)
-	}()
-
-	for result := range resultsChan {
-		fmt.Printf("Can reach %v through %v\n", result.Target, result.Front)
-	}
+	// all `Pairing`s have been checked and all the successful ones have been
+	// printed out.
+	workersWg.Wait()
 }
 
-func work(tasksChan <-chan Pairing, resultsChan chan<- Pairing, workersWg *sync.WaitGroup) {
+func work(tasksChan <-chan Pairing, workersWg *sync.WaitGroup) {
 	for task := range tasksChan {
 		if canProxy(task) {
-			resultsChan <- task
+			fmt.Printf("We can reach %v through %v\n", task.Target, task.Front)
 		}
 	}
 	logDebug("One worker done")
@@ -105,6 +105,8 @@ func canProxy(p Pairing) bool {
 					p.Target+":443",
 					// We can't use a domain front that requires a properly
 					// populated SNI, so let's make those fail.
+					// These should have been filtered out already, but let's
+					// check anyway for robustness to change.
 					false,
 					&tls.Config{InsecureSkipVerify: true},
 				)
@@ -112,7 +114,10 @@ func canProxy(p Pairing) bool {
 		},
 		CheckRedirect: noRedirect,
 	}
-	req, err := http.NewRequest("GET", "http://"+p.Front+p.Path, nil)
+	u := p.TargetURL
+	u.Host = p.FrontURL.Host
+	logDebug("Trying to hit", p.Target, "through", u.String())
+	req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {
 		logErr("building GET request", err)
 		return false
@@ -144,72 +149,111 @@ func feedTasks(taskChan chan<- Pairing) {
 	if err != nil {
 		panic(err)
 	}
+
+	// Domains for which we can't get a hash, even without domain fronting.
+	badDomains := make(map[string]bool)
+
+	// No-redirect URLs
+	nru := make(map[string]url.URL)
+
+	// No-redirect hashes
+	nrh := make(map[string]string)
+
+	urlAndHash := func(domain string) (u url.URL, hash string) {
+		if _, ok := badDomains[domain]; ok {
+			return url.URL{}, ""
+		}
+		u, ok := nru[domain]
+		if ok {
+			hash = nrh[domain]
+		} else {
+			u, hash, err := followRedirects(domain)
+			if err != nil {
+				logErr("can't reach "+domain+" *without* a proxy", err)
+				badDomains[domain] = true
+				return url.URL{}, ""
+			} else {
+				nru[domain] = u
+				nrh[domain] = hash
+			}
+		}
+		return
+	}
+
+	nilURL := url.URL{}
 	for _, target := range targets {
 		logDebug("Trying", target)
-		path, hash, err := fetchTarget(target)
-		if err != nil {
-			logErr("can't reach "+target+" *without* a proxy", err)
+		targetURL, hash := urlAndHash(target)
+		if targetURL == nilURL {
 			continue
 		}
 		for _, front := range fronts {
 			logDebug("Enqueuing pairing:", front, target)
-			taskChan <- Pairing{Target: target, Path: path, Hash: hash, Front: front}
+			frontURL, _ := urlAndHash(target)
+			if frontURL == nilURL {
+				continue
+			}
+			taskChan <- Pairing{
+				Target:    target,
+				TargetURL: targetURL,
+				Hash:      hash,
+				Front:     front,
+				FrontURL:  frontURL,
+			}
 		}
 	}
 	logDebug("Enqueued all input")
 	close(taskChan)
 }
 
-// fetchTarget makes a request for the given target *without* domain fronting,
-// returning a path that will hopefully not redirect, and the hash of the
-// response body.
-func fetchTarget(target string) (path string, hash string, err error) {
+// followRedirects makes a request for the given domain without domain fronting,
+// returning an URL that will hopefully not redirect, and the hash
+// of the response body.
+func followRedirects(domain string) (u url.URL, hash string, err error) {
 	client := &http.Client{
 		Transport: &http.Transport{
 			Dial: func(network, addr string) (conn net.Conn, err error) {
 				return tlsdialer.Dial(
 					"tcp",
-					target+":443",
-					// We're doing, not front candidates, here, so no need to
-					// filter out those that will require a properly populated
-					// SNI.
+					domain+":443",
+					// We don't filter out potential domain fronts at this
+					// point, since this is used for targets too.
 					true,
 					&tls.Config{InsecureSkipVerify: true},
 				)
 			},
 		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			path = via[len(via)-1].URL.Path
-			logDebug("(re)setting path to", path)
+			u = *req.URL
+			logDebug("(re)setting URL to", u.String())
 			return nil
 		},
 	}
-	req, err := http.NewRequest("GET", "http://"+target, nil)
+	req, err := http.NewRequest("GET", "https://"+domain, nil)
 	if err != nil {
 		logErr("building GET request", err)
-		return "", "", err
+		return url.URL{}, "", err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
 		logErr("performing GET request", err)
-		return "", "", err
+		return url.URL{}, "", err
 	}
 	hash, err = bodyHash(resp)
 	if err != nil {
 		logErr("getting body hash", err)
-		return "", "", err
+		return url.URL{}, "", err
 	}
 	return
 }
 
 func bodyHash(resp *http.Response) (string, error) {
-	body, err := ioutil.ReadAll(resp.Body)
+	h := sha1.New()
+	_, err := io.Copy(h, resp.Body)
 	defer resp.Body.Close()
 	if err != nil {
 		return "", err
 	}
-	h := sha1.New()
-	h.Write(body)
 	bs := h.Sum(nil)
 	return fmt.Sprintf("%x", bs), nil
 }
@@ -228,7 +272,7 @@ func readLines(filename string) ([]string, error) {
 }
 
 func noRedirect(req *http.Request, via []*http.Request) error {
-	return errors.New("Don't redirect!: " + via[len(via)-1].URL.String())
+	return errors.New("Don't redirect!: " + req.URL.String())
 }
 
 func logErr(msg string, err error) {
@@ -237,6 +281,8 @@ func logErr(msg string, err error) {
 	}
 }
 
+// Poor man's debug level switch.  Comment out the body to suppress noise.
+// XXX: learn about the idiomatic way to do this in Go
 func logDebug(vs ...interface{}) {
 	log.Println(vs...)
 }
