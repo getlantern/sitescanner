@@ -41,10 +41,8 @@ var dialTimeout = 10 * time.Second
 // successfully fronting to a target.
 //
 // We are also checking whether we get a 200 OK response from the site at all,
-// but we don't include this in ResponseFeatures becouse we will not even try
-// domain fronting to sites for which we don't get 200 OK in a direct request,
-// and we are not reporting sites for which we don't get a 200 OK through
-// domain fronting.
+// but we don't include this in ResponseFeatures becouse we are not reporting
+// sites for which we don't get a 200 OK through domain fronting.
 type ResponseFeatures struct {
 	// Hash of the body's <head> element, or "" if the body has none
 	HeadHash string
@@ -199,7 +197,7 @@ func feedTasks(taskChan chan<- Pairing) {
 				badDomains[domain] = true
 				return nilURL, nilRF
 			} else {
-				logDebug("Got new url", u.String(), "fetures", rf)
+				logDebug("Got new url", u.String(), "features", rf)
 				nru[domain] = u
 				nrf[domain] = rf
 				return u, rf
