@@ -1,4 +1,2 @@
-reddit.com
-news.ycombinator.com
 cloudflare.com
-cdnjs.com
+a248.e.akamai.net

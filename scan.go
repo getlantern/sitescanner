@@ -32,7 +32,9 @@ var workers = runtime.NumCPU()
 
 var headRe *regexp.Regexp = regexp.MustCompile("(?s)<head>(.*)</head>")
 
-const reportFmt = "%-24s %-24s %-10s %-10s\n"
+const reportFmt = "%-24s %-24s %-12s %-12s\n"
+
+var dialTimeout = 10 * time.Second
 
 // ResponseFeatures contains the characteristics we'll use when comparing
 // direct vs domain fronted Responses, to estimate the likelihood that we are
@@ -63,9 +65,8 @@ type Pairing struct {
 	Features ResponseFeatures
 }
 
-
 func main() {
-	runtime.GOMAXPROCS(runtime.NumCPU())
+	runtime.GOMAXPROCS(runtime.NumCPU() * 10)
 	start := time.Now()
 	fmt.Println()
 	fmt.Printf(reportFmt, "TARGET", "FRONT", "BODIES", "HEADS")
@@ -126,7 +127,8 @@ func proxiedResponseFeatures(p Pairing) (ResponseFeatures, error) {
 	client := &http.Client{
 		Transport: &http.Transport{
 			Dial: func(network, addr string) (conn net.Conn, err error) {
-				return tlsdialer.Dial(
+				return tlsdialer.DialWithDialer(
+					&net.Dialer{Timeout: dialTimeout},
 					"tcp",
 					p.Target+":443",
 					// We can't use a domain front that requires a properly
@@ -216,14 +218,16 @@ func feedTasks(taskChan chan<- Pairing) {
 			logDebug("Enqueuing pairing:", front, target)
 			frontURL, _ := URLnRF(front)
 			if frontURL == nilURL {
-				continue
+				// Some CDNs like akamai or Fastly don't like to have their /s
+				// requested, but will still domain front.
+				frontURL = url.URL{Scheme: "http", Host: front}
 			}
 			taskChan <- Pairing{
 				Target:    target,
 				TargetURL: targetURL,
 				Front:     front,
 				FrontURL:  frontURL,
-				Features: features,
+				Features:  features,
 			}
 		}
 	}
@@ -235,23 +239,26 @@ func feedTasks(taskChan chan<- Pairing) {
 // returning a URL that will hopefully not redirect, and the relevant features
 // of the response.
 func followRedirects(domain string) (u url.URL, rf ResponseFeatures, err error) {
+	retriesLeft := 10
 	// use http scheme to avoid getting double-TLSed
 	u = url.URL{Scheme: "http", Host: domain}
 	client := &http.Client{
 		Transport: &http.Transport{
 			Dial: func(network, addr string) (conn net.Conn, err error) {
 				logDebug("** trying to get", addr)
-				return tlsdialer.Dial(
+				return tls.DialWithDialer(
+					&net.Dialer{Timeout: dialTimeout},
 					"tcp",
 					domain+":443",
-					// We don't filter out potential domain fronts at this
-					// point, since this is used for targets too.
-					true,
 					&tls.Config{InsecureSkipVerify: true},
 				)
 			},
 		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			retriesLeft--
+			if retriesLeft == 0 {
+				return errors.New("Too many redirects")
+			}
 			// use http scheme to avoid getting double-TLSed
 			req.URL.Scheme = "http"
 			u = *req.URL
@@ -317,7 +324,11 @@ func matchReport(expected, actual string) string {
 			return "match"
 		}
 	} else {
-		return "differ"
+		if actual == "" {
+			return "actual empty"
+		} else {
+			return "differ"
+		}
 	}
 }
 
