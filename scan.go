@@ -304,7 +304,7 @@ func responseFeatures(resp *http.Response) (ret ResponseFeatures, err error) {
 		ret.HeadHash = hash(headMatches[1])
 	}
 	if titleMatches := titleRe.FindSubmatch(body); titleMatches != nil {
-		fmt.Println("Title:", string(titleMatches[1]))
+		logDebug("Title:", string(titleMatches[1]))
 		ret.TitleHash = hash(titleMatches[1])
 	}
 	return
