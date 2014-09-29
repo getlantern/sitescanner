@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	debuglog "github.com/getlantern/sitescanner/log"
 	"gopkg.in/getlantern/tlsdialer.v1"
 )
 
@@ -64,6 +65,7 @@ type Pairing struct {
 }
 
 func main() {
+	debuglog.Debug("I'm debugging stuff!")
 	runtime.GOMAXPROCS(runtime.NumCPU() * 10)
 	start := time.Now()
 	fmt.Println()
