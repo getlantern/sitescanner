@@ -32,7 +32,9 @@ var workers = runtime.NumCPU()
 
 var headRe *regexp.Regexp = regexp.MustCompile("(?s)<head>(.*)</head>")
 
-const reportFmt = "%-24s %-24s %-12s %-12s\n"
+var titleRe *regexp.Regexp = regexp.MustCompile("(?s)<title>(.*)</title>")
+
+const reportFmt = "%-24s %-24s %-12s %-12s %-12s\n"
 
 var dialTimeout = 10 * time.Second
 
@@ -44,10 +46,12 @@ var dialTimeout = 10 * time.Second
 // but we don't include this in ResponseFeatures becouse we are not reporting
 // sites for which we don't get a 200 OK through domain fronting.
 type ResponseFeatures struct {
-	// Hash of the body's <head> element, or "" if the body has none
-	HeadHash string
 	// Hash of the whole body, or "" if the body is the empty string
 	BodyHash string
+	// Hash of the response body's <head> element, or "" if it has none
+	HeadHash string
+	// Hash of the <title> element, or "" if the response body has none.
+	TitleHash string
 }
 
 type Pairing struct {
@@ -67,8 +71,8 @@ func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU() * 10)
 	start := time.Now()
 	fmt.Println()
-	fmt.Printf(reportFmt, "TARGET", "FRONT", "BODIES", "HEADS")
-	fmt.Printf(reportFmt, "======", "=====", "======", "=====")
+	fmt.Printf(reportFmt, "TARGET", "FRONT", "BODIES", "HEADS", "TITLES")
+	fmt.Printf(reportFmt, "======", "=====", "======", "=====", "======")
 	fmt.Println()
 	main_()
 	fmt.Println("**************** COMPLETE ******************")
@@ -114,6 +118,7 @@ func work(tasksChan <-chan Pairing, workersWg *sync.WaitGroup) {
 			task.Front,
 			matchReport(task.Features.BodyHash, features.BodyHash),
 			matchReport(task.Features.HeadHash, features.HeadHash),
+			matchReport(task.Features.TitleHash, features.TitleHash),
 		)
 	}
 	logDebug("One worker done")
@@ -292,17 +297,18 @@ func responseFeatures(resp *http.Response) (ret ResponseFeatures, err error) {
 	if err != nil {
 		return ret, err
 	}
+	// In what follows, we take advantage of the fact that all ret fields start
+	// at their zero value (in particular, "" for strings).
 	if body == nil {
-		ret.BodyHash = ""
-		ret.HeadHash = ""
 		return ret, nil
 	}
 	ret.BodyHash = hash(body)
-	headMatches := headRe.FindSubmatch(body)
-	if headMatches == nil {
-		ret.HeadHash = ""
-	} else {
+	if headMatches := headRe.FindSubmatch(body); headMatches != nil {
 		ret.HeadHash = hash(headMatches[1])
+	}
+	if titleMatches := titleRe.FindSubmatch(body); titleMatches != nil {
+		fmt.Println("Title:", string(titleMatches[1]))
+		ret.TitleHash = hash(titleMatches[1])
 	}
 	return
 }
