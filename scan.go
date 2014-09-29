@@ -133,7 +133,7 @@ func proxiedResponseFeatures(p Pairing) (ResponseFeatures, error) {
 				return tlsdialer.DialWithDialer(
 					&net.Dialer{Timeout: dialTimeout},
 					"tcp",
-					p.Target+":443",
+					p.FrontURL.Host+":443",
 					// We can't use a domain front that requires a properly
 					// populated SNI, so let's make those fail.
 					false,
@@ -143,10 +143,7 @@ func proxiedResponseFeatures(p Pairing) (ResponseFeatures, error) {
 		},
 		CheckRedirect: noRedirect,
 	}
-	u := p.TargetURL
-	u.Host = p.FrontURL.Host
-	logDebug("Trying to hit", p.Target, "through", u.String())
-	req, err := http.NewRequest("GET", u.String(), nil)
+	req, err := http.NewRequest("GET", p.TargetURL.String(), nil)
 	if err != nil {
 		logErr("building GET request", err)
 		return ResponseFeatures{}, err
