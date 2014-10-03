@@ -74,11 +74,12 @@ type Pairing struct {
 }
 
 func main() {
+	flag.Parse()
 	runtime.GOMAXPROCS(runtime.NumCPU() * 10)
 	start := time.Now()
 	fmt.Println()
-	fmt.Printf(reportFmt, "TARGET", "FRONT", "BODIES", "HEADS", "TITLES")
-	fmt.Printf(reportFmt, "======", "=====", "======", "=====", "======")
+	fmt.Printf(reportFmt, "TARGET", "FRONT", "BODIES", "HEADS", "TITLES", "REDIRECTED URL")
+	fmt.Printf(reportFmt, "======", "=====", "======", "=====", "======", "==============")
 	fmt.Println()
 	main_()
 	fmt.Println("**************** COMPLETE ******************")
@@ -118,13 +119,21 @@ func work(tasksChan <-chan Pairing, workersWg *sync.WaitGroup) {
 			logDebug("proxiedResponseFeatures error:", err)
 			continue
 		}
+		bodiesMatch := matchReport(task.Features.BodyHash, features.BodyHash)
+		headsMatch := matchReport(task.Features.HeadHash, features.HeadHash)
+		titlesMatch := matchReport(task.Features.TitleHash, features.TitleHash)
+		if bodiesMatch != "match" && headsMatch != "match" && titlesMatch != "match" {
+			logDebug("Got an OK response fronting", task.Target, "through", task.Front, "but nothing matches.")
+			continue
+		}
 		fmt.Printf(
 			reportFmt,
 			task.Target,
 			task.Front,
-			matchReport(task.Features.BodyHash, features.BodyHash),
-			matchReport(task.Features.HeadHash, features.HeadHash),
-			matchReport(task.Features.TitleHash, features.TitleHash),
+			bodiesMatch,
+			headsMatch,
+			titlesMatch,
+			task.TargetURL.String(),
 		)
 	}
 	logDebug("One worker done")
