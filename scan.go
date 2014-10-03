@@ -3,6 +3,9 @@
 //        check whether we can reach the target domain by attempting domain
 //        fronting through the front candidate.  Log successfully proxied pairs
 //        to stdout.  Log detected errors to stderr.
+//
+// run with `-tags debug` to enable debug logging.  See `-help` for other
+// options.
 
 // XXX: record where we left off, to enable resuming an interrupted scan.
 
