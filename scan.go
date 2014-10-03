@@ -13,6 +13,7 @@ import (
 	"crypto/sha1"
 	"crypto/tls"
 	"errors"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -25,7 +26,7 @@ import (
 	"sync"
 	"time"
 
-	debuglog "github.com/getlantern/sitescanner/log"
+	dbg "github.com/getlantern/sitescanner/log"
 	"gopkg.in/getlantern/tlsdialer.v1"
 )
 
@@ -33,9 +34,16 @@ var workers = runtime.NumCPU()
 
 var headRe *regexp.Regexp = regexp.MustCompile("(?s)<head>(.*)</head>")
 
-const reportFmt = "%-24s %-24s %-12s %-12s\n"
+var titleRe *regexp.Regexp = regexp.MustCompile("(?s)<title>(.*)</title>")
+
+const reportFmt = "%-24s %-24s %-12s %-12s %-12s %s\n"
 
 var dialTimeout = 10 * time.Second
+
+var fronts = flag.String("fronts", "fronts.txt", "Path to the file containing front candidates, one domain per line.")
+
+var targets = flag.String("targets", "targets.txt", "Path to the file containing fronting targets, one domain per line.")
+
 
 // ResponseFeatures contains the characteristics we'll use when comparing
 // direct vs domain fronted Responses, to estimate the likelihood that we are
@@ -45,10 +53,12 @@ var dialTimeout = 10 * time.Second
 // but we don't include this in ResponseFeatures becouse we are not reporting
 // sites for which we don't get a 200 OK through domain fronting.
 type ResponseFeatures struct {
-	// Hash of the body's <head> element, or "" if the body has none
-	HeadHash string
 	// Hash of the whole body, or "" if the body is the empty string
 	BodyHash string
+	// Hash of the response body's <head> element, or "" if it has none
+	HeadHash string
+	// Hash of the <title> element, or "" if the response body has none.
+	TitleHash string
 }
 
 type Pairing struct {
@@ -65,12 +75,12 @@ type Pairing struct {
 }
 
 func main() {
-	debuglog.Debug("I'm debugging stuff!")
+	flag.Parse()
 	runtime.GOMAXPROCS(runtime.NumCPU() * 10)
 	start := time.Now()
 	fmt.Println()
-	fmt.Printf(reportFmt, "TARGET", "FRONT", "BODIES", "HEADS")
-	fmt.Printf(reportFmt, "======", "=====", "======", "=====")
+	fmt.Printf(reportFmt, "TARGET", "FRONT", "BODIES", "HEADS", "TITLES", "REDIRECTED URL")
+	fmt.Printf(reportFmt, "======", "=====", "======", "=====", "======", "==============")
 	fmt.Println()
 	main_()
 	fmt.Println("**************** COMPLETE ******************")
@@ -107,30 +117,39 @@ func work(tasksChan <-chan Pairing, workersWg *sync.WaitGroup) {
 	for task := range tasksChan {
 		features, err := proxiedResponseFeatures(task)
 		if err != nil {
-			logDebug("proxiedResponseFeatures error:", err)
+			dbg.Debugln("proxiedResponseFeatures error:", err)
+			continue
+		}
+		bodiesMatch := matchReport(task.Features.BodyHash, features.BodyHash)
+		headsMatch := matchReport(task.Features.HeadHash, features.HeadHash)
+		titlesMatch := matchReport(task.Features.TitleHash, features.TitleHash)
+		if bodiesMatch != "match" && headsMatch != "match" && titlesMatch != "match" {
+			dbg.Debugln("Got an OK response fronting", task.Target, "through", task.Front, "but nothing matches.")
 			continue
 		}
 		fmt.Printf(
 			reportFmt,
 			task.Target,
 			task.Front,
-			matchReport(task.Features.BodyHash, features.BodyHash),
-			matchReport(task.Features.HeadHash, features.HeadHash),
+			bodiesMatch,
+			headsMatch,
+			titlesMatch,
+			task.TargetURL.String(),
 		)
 	}
-	logDebug("One worker done")
+	dbg.Debugln("One worker done")
 	workersWg.Done()
 }
 
 func proxiedResponseFeatures(p Pairing) (ResponseFeatures, error) {
-	logDebug("canProxy", p)
+	dbg.Debugln("canProxy", p)
 	client := &http.Client{
 		Transport: &http.Transport{
 			Dial: func(network, addr string) (conn net.Conn, err error) {
 				return tlsdialer.DialWithDialer(
 					&net.Dialer{Timeout: dialTimeout},
 					"tcp",
-					p.Target+":443",
+					p.FrontURL.Host+":443",
 					// We can't use a domain front that requires a properly
 					// populated SNI, so let's make those fail.
 					false,
@@ -140,10 +159,7 @@ func proxiedResponseFeatures(p Pairing) (ResponseFeatures, error) {
 		},
 		CheckRedirect: noRedirect,
 	}
-	u := p.TargetURL
-	u.Host = p.FrontURL.Host
-	logDebug("Trying to hit", p.Target, "through", u.String())
-	req, err := http.NewRequest("GET", u.String(), nil)
+	req, err := http.NewRequest("GET", p.TargetURL.String(), nil)
 	if err != nil {
 		logErr("building GET request", err)
 		return ResponseFeatures{}, err
@@ -159,13 +175,11 @@ func proxiedResponseFeatures(p Pairing) (ResponseFeatures, error) {
 // feedTasks reads input files, enqueues testing tasks in taskChan, and closes
 // taskChan when done.
 func feedTasks(taskChan chan<- Pairing) {
-	//XXX: -fronts command line parameter
-	fronts, err := readLines("fronts.txt")
+	fronts, err := readLines(*fronts)
 	if err != nil {
 		panic(err)
 	}
-	//XXX: -targets command line parameter
-	targets, err := readLines("targets.txt")
+	targets, err := readLines(*targets)
 	if err != nil {
 		panic(err)
 	}
@@ -185,12 +199,12 @@ func feedTasks(taskChan chan<- Pairing) {
 	// URLnRF just provides caching and some logging on top of followRedirects.
 	URLnRF := func(domain string) (url.URL, ResponseFeatures) {
 		if _, ok := badDomains[domain]; ok {
-			logDebug("Known bad domain", domain)
+			dbg.Debugln("Known bad domain", domain)
 			return nilURL, nilRF
 		}
 		u, ok := nru[domain]
 		if ok {
-			logDebug("Cached domain", domain, u.String())
+			dbg.Debugln("Cached domain", domain, u.String())
 			return u, nrf[domain]
 		} else {
 			u, rf, err := followRedirects(domain)
@@ -199,7 +213,7 @@ func feedTasks(taskChan chan<- Pairing) {
 				badDomains[domain] = true
 				return nilURL, nilRF
 			} else {
-				logDebug("Got new url", u.String(), "features", rf)
+				dbg.Debugln("Got new url", u.String(), "features", rf)
 				nru[domain] = u
 				nrf[domain] = rf
 				return u, rf
@@ -208,14 +222,20 @@ func feedTasks(taskChan chan<- Pairing) {
 	}
 
 	for _, target := range targets {
-		logDebug("Trying", target)
+		dbg.Debugln("Trying", target)
 		targetURL, features := URLnRF(target)
 		if targetURL == nilURL {
-			logDebug("Got null URL for", target)
-			continue
+			dbg.Debugln("Got null URL for", target)
+			// This works for Baidu at least.  Worth trying, should there be
+			// more sites for which www. works, the naked domain doesn't, and
+			// which won't automatically redirect.
+			targetURL, features = URLnRF("www." + target)
+			if targetURL == nilURL {
+				continue
+			}
 		}
 		for _, front := range fronts {
-			logDebug("Enqueuing pairing:", front, target)
+			dbg.Debugln("Enqueuing pairing:", front, target)
 			frontURL, _ := URLnRF(front)
 			if frontURL == nilURL {
 				// Some CDNs like akamai or Fastly don't like to have their /s
@@ -231,7 +251,7 @@ func feedTasks(taskChan chan<- Pairing) {
 			}
 		}
 	}
-	logDebug("Enqueued all input")
+	dbg.Debugln("Enqueued all input")
 	close(taskChan)
 }
 
@@ -245,7 +265,7 @@ func followRedirects(domain string) (u url.URL, rf ResponseFeatures, err error) 
 	client := &http.Client{
 		Transport: &http.Transport{
 			Dial: func(network, addr string) (conn net.Conn, err error) {
-				logDebug("** trying to get", addr)
+				dbg.Debugln("** trying to get", addr)
 				return tls.DialWithDialer(
 					&net.Dialer{Timeout: dialTimeout},
 					"tcp",
@@ -262,7 +282,7 @@ func followRedirects(domain string) (u url.URL, rf ResponseFeatures, err error) 
 			// use http scheme to avoid getting double-TLSed
 			req.URL.Scheme = "http"
 			u = *req.URL
-			logDebug("(re)setting URL to", u.String())
+			dbg.Debugln("(re)setting URL to", u.String())
 			return nil
 		},
 	}
@@ -294,17 +314,18 @@ func responseFeatures(resp *http.Response) (ret ResponseFeatures, err error) {
 	if err != nil {
 		return ret, err
 	}
+	// In what follows, we take advantage of the fact that all ret fields start
+	// at their zero value (in particular, "" for strings).
 	if body == nil {
-		ret.BodyHash = ""
-		ret.HeadHash = ""
 		return ret, nil
 	}
 	ret.BodyHash = hash(body)
-	headMatches := headRe.FindSubmatch(body)
-	if headMatches == nil {
-		ret.HeadHash = ""
-	} else {
+	if headMatches := headRe.FindSubmatch(body); headMatches != nil {
 		ret.HeadHash = hash(headMatches[1])
+	}
+	if titleMatches := titleRe.FindSubmatch(body); titleMatches != nil {
+		dbg.Debugln("Title:", string(titleMatches[1]))
+		ret.TitleHash = hash(titleMatches[1])
 	}
 	return
 }
@@ -353,10 +374,4 @@ func logErr(msg string, err error) {
 	if err != nil {
 		log.Printf("ERROR %s: %v\n", msg, err)
 	}
-}
-
-// Poor man's debug level switch.  Comment out the body to suppress noise.
-// XXX: learn about the idiomatic way to do this in Go
-func logDebug(vs ...interface{}) {
-	//log.Println(vs...)
 }

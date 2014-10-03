@@ -2,4 +2,5 @@
 
 package log
 
-func Debug(fmt string, args ...interface{}) {}
+func Debugf(fmt string, args ...interface{}) {}
+func Debugln(args ...interface{}) {}

@@ -6,6 +6,10 @@ import (
 	"log"
 )
 
-func Debug(fmt string, args ...interface{}) {
+func Debugf(fmt string, args ...interface{}) {
 	log.Printf(fmt, args...)
+}
+
+func Debugln(args ...interface{}) {
+	log.Println(args...)
 }
