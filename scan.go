@@ -225,7 +225,13 @@ func feedTasks(taskChan chan<- Pairing) {
 		targetURL, features := URLnRF(target)
 		if targetURL == nilURL {
 			logDebug("Got null URL for", target)
-			continue
+			// This works for Baidu at least.  Worth trying, should there be
+			// more sites for which www. works, the naked domain doesn't, and
+			// which won't automatically redirect.
+			targetURL, features = URLnRF("www." + target)
+			if targetURL == nilURL {
+				continue
+			}
 		}
 		for _, front := range fronts {
 			logDebug("Enqueuing pairing:", front, target)
