@@ -13,6 +13,7 @@ import (
 	"crypto/sha1"
 	"crypto/tls"
 	"errors"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -34,9 +35,14 @@ var headRe *regexp.Regexp = regexp.MustCompile("(?s)<head>(.*)</head>")
 
 var titleRe *regexp.Regexp = regexp.MustCompile("(?s)<title>(.*)</title>")
 
-const reportFmt = "%-24s %-24s %-12s %-12s %-12s\n"
+const reportFmt = "%-24s %-24s %-12s %-12s %-12s %s\n"
 
 var dialTimeout = 10 * time.Second
+
+var fronts = flag.String("fronts", "fronts.txt", "Path to the file containing front candidates, one domain per line.")
+
+var targets = flag.String("targets", "targets.txt", "Path to the file containing fronting targets, one domain per line.")
+
 
 // ResponseFeatures contains the characteristics we'll use when comparing
 // direct vs domain fronted Responses, to estimate the likelihood that we are
@@ -159,13 +165,11 @@ func proxiedResponseFeatures(p Pairing) (ResponseFeatures, error) {
 // feedTasks reads input files, enqueues testing tasks in taskChan, and closes
 // taskChan when done.
 func feedTasks(taskChan chan<- Pairing) {
-	//XXX: -fronts command line parameter
-	fronts, err := readLines("fronts.txt")
+	fronts, err := readLines(*fronts)
 	if err != nil {
 		panic(err)
 	}
-	//XXX: -targets command line parameter
-	targets, err := readLines("targets.txt")
+	targets, err := readLines(*targets)
 	if err != nil {
 		panic(err)
 	}
