@@ -33,8 +33,6 @@ import (
 	"gopkg.in/getlantern/tlsdialer.v1"
 )
 
-var workers = runtime.NumCPU()
-
 var headRe *regexp.Regexp = regexp.MustCompile("(?s)<head>(.*)</head>")
 
 var titleRe *regexp.Regexp = regexp.MustCompile("(?s)<title>(.*)</title>")
@@ -46,6 +44,8 @@ var dialTimeout = 10 * time.Second
 var fronts = flag.String("fronts", "fronts.txt", "Path to the file containing front candidates, one domain per line.")
 
 var targets = flag.String("targets", "targets.txt", "Path to the file containing fronting targets, one domain per line.")
+
+var workers = flag.Int("workers", runtime.NumCPU() * 100, "Number of concurrent worker goroutines.")
 
 
 // ResponseFeatures contains the characteristics we'll use when comparing
@@ -79,7 +79,7 @@ type Pairing struct {
 
 func main() {
 	flag.Parse()
-	runtime.GOMAXPROCS(runtime.NumCPU() * 10)
+	runtime.GOMAXPROCS(runtime.NumCPU())
 	start := time.Now()
 	fmt.Println()
 	fmt.Printf(reportFmt, "TARGET", "FRONT", "BODIES", "HEADS", "TITLES", "REDIRECTED URL")
@@ -92,7 +92,7 @@ func main() {
 
 func main_() {
 
-	tasksChan := make(chan Pairing, workers)
+	tasksChan := make(chan Pairing, *workers)
 
 	workersWg := sync.WaitGroup{}
 
@@ -100,8 +100,8 @@ func main_() {
 	// generate it lazily.
 	go feedTasks(tasksChan)
 
-	workersWg.Add(workers)
-	for i := 0; i < workers; i++ {
+	workersWg.Add(*workers)
+	for i := 0; i < *workers; i++ {
 		go work(tasksChan, &workersWg)
 	}
 
