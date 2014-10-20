@@ -37,7 +37,7 @@ var headRe *regexp.Regexp = regexp.MustCompile("(?s)<head>(.*)</head>")
 
 var titleRe *regexp.Regexp = regexp.MustCompile("(?s)<title>(.*)</title>")
 
-const reportFmt = "%-24s %-24s %-12s %-12s %-12s %s\n"
+const reportFmt = "%-24s %-24s %-12s %-12s %-12s %-20s %s\n"
 
 var dialTimeout = 10 * time.Second
 
@@ -73,6 +73,8 @@ type Pairing struct {
 	Front string
 	// A URL where we can hopefully reach Front without redirects.
 	FrontURL url.URL
+	// A string of the form ip-address:port
+	FrontIPPort string
 
 	Features ResponseFeatures
 }
@@ -82,8 +84,8 @@ func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	start := time.Now()
 	fmt.Println()
-	fmt.Printf(reportFmt, "TARGET", "FRONT", "BODIES", "HEADS", "TITLES", "REDIRECTED URL")
-	fmt.Printf(reportFmt, "======", "=====", "======", "=====", "======", "==============")
+	fmt.Printf(reportFmt, "TARGET", "FRONT", "BODIES", "HEADS", "TITLES", "FRONT IP:PORT", "REDIRECTED URLS")
+	fmt.Printf(reportFmt, "======", "=====", "======", "=====", "======", "=============", "===============")
 	fmt.Println()
 	main_()
 	fmt.Println("**************** COMPLETE ******************")
@@ -137,7 +139,8 @@ func work(tasksChan <-chan Pairing, workersWg *sync.WaitGroup) {
 			bodiesMatch,
 			headsMatch,
 			titlesMatch,
-			task.TargetURL.String(),
+			task.FrontIPPort,
+			task.TargetURL.String() + ", " + task.FrontURL.String(),
 		)
 	}
 	dbg.Debugln("One worker done")
@@ -196,6 +199,9 @@ func feedTasks(taskChan chan<- Pairing) {
 	// No-redirect response features
 	nrf := make(map[string]ResponseFeatures)
 
+	// Strings with form ip-address:port
+	ipPorts := make(map[string]string)
+
 	nilURL := url.URL{}
 	nilRF := ResponseFeatures{}
 
@@ -210,7 +216,7 @@ func feedTasks(taskChan chan<- Pairing) {
 			dbg.Debugln("Cached domain", domain, u.String())
 			return u, nrf[domain]
 		} else {
-			u, rf, err := followRedirects(domain)
+			u, ipPort, rf, err := followRedirects(domain)
 			if err != nil {
 				logErr("can't reach "+domain+" *without* a proxy", err)
 				badDomains[domain] = true
@@ -219,6 +225,7 @@ func feedTasks(taskChan chan<- Pairing) {
 				dbg.Debugln("Got new url", u.String(), "features", rf)
 				nru[domain] = u
 				nrf[domain] = rf
+				ipPorts[domain] = ipPort
 				return u, rf
 			}
 		}
@@ -250,6 +257,7 @@ func feedTasks(taskChan chan<- Pairing) {
 				TargetURL: targetURL,
 				Front:     front,
 				FrontURL:  frontURL,
+				FrontIPPort: ipPorts[front],
 				Features:  features,
 			}
 		}
@@ -261,7 +269,7 @@ func feedTasks(taskChan chan<- Pairing) {
 // followRedirects makes a request for the given domain without domain fronting,
 // returning a URL that will hopefully not redirect, and the relevant features
 // of the response.
-func followRedirects(domain string) (u url.URL, rf ResponseFeatures, err error) {
+func followRedirects(domain string) (u url.URL, ipPort string, rf ResponseFeatures, err error) {
 	retriesLeft := 10
 	// use http scheme to avoid getting double-TLSed
 	u = url.URL{Scheme: "http", Host: domain}
@@ -269,12 +277,14 @@ func followRedirects(domain string) (u url.URL, rf ResponseFeatures, err error) 
 		Transport: &http.Transport{
 			Dial: func(network, addr string) (conn net.Conn, err error) {
 				dbg.Debugln("** trying to get", addr)
-				return tls.DialWithDialer(
+				conn, err = tls.DialWithDialer(
 					&net.Dialer{Timeout: dialTimeout},
 					"tcp",
 					domain+":443",
 					&tls.Config{InsecureSkipVerify: true},
 				)
+				ipPort = conn.RemoteAddr().String()
+				return conn, err
 			},
 		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -293,20 +303,20 @@ func followRedirects(domain string) (u url.URL, rf ResponseFeatures, err error) 
 	req, err := http.NewRequest("GET", "http://"+domain, nil)
 	if err != nil {
 		logErr("building GET request", err)
-		return url.URL{}, rf, err
+		return url.URL{}, ipPort, rf, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
 		logErr("performing GET request", err)
-		return url.URL{}, rf, err
+		return url.URL{}, ipPort, rf, err
 	}
 	if resp.StatusCode != 200 {
-		return url.URL{}, rf, errors.New("Non-200 response:" + resp.Status)
+		return url.URL{}, ipPort, rf, errors.New("Non-200 response:" + resp.Status)
 	}
 	rf, err = responseFeatures(resp)
 	if err != nil {
 		logErr("getting response features", err)
-		return url.URL{}, rf, err
+		return url.URL{}, ipPort, rf, err
 	}
 	return
 }
