@@ -283,7 +283,9 @@ func followRedirects(domain string) (u url.URL, ipPort string, rf ResponseFeatur
 					domain+":443",
 					&tls.Config{InsecureSkipVerify: true},
 				)
-				ipPort = conn.RemoteAddr().String()
+				if err == nil {
+					ipPort = conn.RemoteAddr().String()
+				}
 				return conn, err
 			},
 		},
