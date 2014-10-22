@@ -25,6 +25,7 @@ expected_title = u'<title>Home | CloudFlare | The web performance &amp; security
 
 def main(infile, outfile):
     times = {}
+    print "Collecting IPs..."
     for domain in domains_from_scanner_output(open(infile).read()):
         # Prefer the first domain with any given IP, since that has the higher
         # Alexa ranking.
